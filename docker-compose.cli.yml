@@ -1,0 +1,18 @@
+services:
+  wnacg-cli:
+    build:
+      context: .
+      dockerfile: Dockerfile.cli
+    container_name: wnacg-cli
+    working_dir: /workspace
+    restart: always
+    environment:
+      WNACG_TASK_API_BASE: "http://127.0.0.1:3000"
+      WNACG_WEB_DIST_PATH: "/usr/local/share/wnacg-web"
+      WNACG_CLI_PATH: "/usr/local/libexec/wnacg-worker"
+    volumes:
+      - /vol2/1000/download:/data
+      - ./docker-config:/config
+    ports:
+      - "3001:3000"
+    command: ["wnacg-api"]
