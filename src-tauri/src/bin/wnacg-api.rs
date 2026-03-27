@@ -36,6 +36,27 @@ struct CommonQuery {
     config: Option<String>,
 }
 
+impl CommonQuery {
+    fn append_cli_args(self, args: &mut Vec<String>) {
+        if let Some(api_domain) = self.api_domain {
+            args.push("--api-domain".to_string());
+            args.push(api_domain);
+        }
+        if let Some(proxy) = self.proxy {
+            args.push("--proxy".to_string());
+            args.push(proxy);
+        }
+        if let Some(download_dir) = self.download_dir {
+            args.push("--download-dir".to_string());
+            args.push(download_dir);
+        }
+        if let Some(config) = self.config {
+            args.push("--config".to_string());
+            args.push(config);
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct KeywordSearchQuery {
     q: String,
@@ -67,6 +88,44 @@ struct DownloadQuery {
     proxy: Option<String>,
     download_dir: Option<String>,
     config: Option<String>,
+}
+
+impl DownloadQuery {
+    fn common_query(&self) -> CommonQuery {
+        CommonQuery {
+            api_domain: self.api_domain.clone(),
+            proxy: self.proxy.clone(),
+            download_dir: self.download_dir.clone(),
+            config: self.config.clone(),
+        }
+    }
+
+    fn comic_args(&self) -> Vec<String> {
+        let mut args = vec!["comic".to_string(), "--json".to_string(), self.target.clone()];
+        self.common_query().append_cli_args(&mut args);
+        args
+    }
+
+    fn download_args(&self) -> Vec<String> {
+        let mut args = vec!["download".to_string(), self.target.clone()];
+        if let Some(format) = &self.format {
+            args.push("--format".to_string());
+            args.push(format.clone());
+        }
+        if let Some(img_concurrency) = self.img_concurrency {
+            args.push("--img-concurrency".to_string());
+            args.push(img_concurrency.to_string());
+        }
+        if let Some(img_interval_sec) = self.img_interval_sec {
+            args.push("--img-interval-sec".to_string());
+            args.push(img_interval_sec.to_string());
+        }
+        if self.use_original_filename.unwrap_or(false) {
+            args.push("--use-original-filename".to_string());
+        }
+        self.common_query().append_cli_args(&mut args);
+        args
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -105,6 +164,27 @@ struct ComicInfo {
     title: String,
     cover: String,
     image_count: i64,
+}
+
+impl DownloadTask {
+    fn new(task_id: String, target: String, comic_info: Option<&ComicInfo>, now: String) -> Self {
+        Self {
+            id: task_id,
+            target,
+            status: "downloading".to_string(),
+            title: comic_info.map(|comic| comic.title.clone()),
+            cover: comic_info.map(|comic| comic.cover.clone()),
+            total_pages: comic_info.map(|comic| comic.image_count),
+            completed_pages: 0,
+            error: None,
+            zip_path: None,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            created_at: now.clone(),
+            updated_at: now,
+            finished_at: None,
+        }
+    }
 }
 
 #[tokio::main]
@@ -185,15 +265,13 @@ async fn search_keyword(
         "keyword".to_string(),
         query.q,
     ];
-    push_common_args(
-        &mut args,
-        CommonQuery {
-            api_domain: query.api_domain,
-            proxy: query.proxy,
-            download_dir: query.download_dir,
-            config: query.config,
-        },
-    );
+    CommonQuery {
+        api_domain: query.api_domain,
+        proxy: query.proxy,
+        download_dir: query.download_dir,
+        config: query.config,
+    }
+    .append_cli_args(&mut args);
     run_cli_json(&state.cli_path, args).await
 }
 
@@ -209,30 +287,18 @@ async fn search_tag(
         "tag".to_string(),
         query.tag,
     ];
-    push_common_args(
-        &mut args,
-        CommonQuery {
-            api_domain: query.api_domain,
-            proxy: query.proxy,
-            download_dir: query.download_dir,
-            config: query.config,
-        },
-    );
+    CommonQuery {
+        api_domain: query.api_domain,
+        proxy: query.proxy,
+        download_dir: query.download_dir,
+        config: query.config,
+    }
+    .append_cli_args(&mut args);
     run_cli_json(&state.cli_path, args).await
 }
 
 async fn get_comic(State(state): State<AppState>, Query(query): Query<DownloadQuery>) -> impl IntoResponse {
-    let mut args = vec!["comic".to_string(), "--json".to_string(), query.target];
-    push_common_args(
-        &mut args,
-        CommonQuery {
-            api_domain: query.api_domain,
-            proxy: query.proxy,
-            download_dir: query.download_dir,
-            config: query.config,
-        },
-    );
-    run_cli_json(&state.cli_path, args).await
+    run_cli_json(&state.cli_path, query.comic_args()).await
 }
 
 async fn start_download(
@@ -243,22 +309,7 @@ async fn start_download(
     let now = now_string();
 
     let comic_info = fetch_comic_info(&state.cli_path, &query).await.ok();
-    let task = DownloadTask {
-        id: task_id.clone(),
-        target: query.target.clone(),
-        status: "downloading".to_string(),
-        title: comic_info.as_ref().map(|comic| comic.title.clone()),
-        cover: comic_info.as_ref().map(|comic| comic.cover.clone()),
-        total_pages: comic_info.as_ref().map(|comic| comic.image_count),
-        completed_pages: 0,
-        error: None,
-        zip_path: None,
-        stdout: Vec::new(),
-        stderr: Vec::new(),
-        created_at: now.clone(),
-        updated_at: now,
-        finished_at: None,
-    };
+    let task = DownloadTask::new(task_id.clone(), query.target.clone(), comic_info.as_ref(), now);
 
     state
         .tasks
@@ -293,7 +344,7 @@ async fn get_task(State(state): State<AppState>, Path(id): Path<String>) -> impl
 }
 
 async fn run_download_task(state: AppState, task_id: String, query: DownloadQuery) {
-    let args = build_download_args(query);
+    let args = query.download_args();
     let mut command = Command::new(&state.cli_path);
     command
         .args(&args)
@@ -522,66 +573,8 @@ fn parse_progress(line: &str) -> Option<(usize, usize)> {
     Some((completed.parse().ok()?, total.parse().ok()?))
 }
 
-fn build_download_args(query: DownloadQuery) -> Vec<String> {
-    let mut args = vec!["download".to_string(), query.target];
-    if let Some(format) = query.format {
-        args.push("--format".to_string());
-        args.push(format);
-    }
-    if let Some(img_concurrency) = query.img_concurrency {
-        args.push("--img-concurrency".to_string());
-        args.push(img_concurrency.to_string());
-    }
-    if let Some(img_interval_sec) = query.img_interval_sec {
-        args.push("--img-interval-sec".to_string());
-        args.push(img_interval_sec.to_string());
-    }
-    if query.use_original_filename.unwrap_or(false) {
-        args.push("--use-original-filename".to_string());
-    }
-    push_common_args(
-        &mut args,
-        CommonQuery {
-            api_domain: query.api_domain,
-            proxy: query.proxy,
-            download_dir: query.download_dir,
-            config: query.config,
-        },
-    );
-    args
-}
-
-fn push_common_args(args: &mut Vec<String>, query: CommonQuery) {
-    if let Some(api_domain) = query.api_domain {
-        args.push("--api-domain".to_string());
-        args.push(api_domain);
-    }
-    if let Some(proxy) = query.proxy {
-        args.push("--proxy".to_string());
-        args.push(proxy);
-    }
-    if let Some(download_dir) = query.download_dir {
-        args.push("--download-dir".to_string());
-        args.push(download_dir);
-    }
-    if let Some(config) = query.config {
-        args.push("--config".to_string());
-        args.push(config);
-    }
-}
-
 async fn fetch_comic_info(cli_path: &str, query: &DownloadQuery) -> anyhow::Result<ComicInfo> {
-    let mut args = vec!["comic".to_string(), "--json".to_string(), query.target.clone()];
-    push_common_args(
-        &mut args,
-        CommonQuery {
-            api_domain: query.api_domain.clone(),
-            proxy: query.proxy.clone(),
-            download_dir: query.download_dir.clone(),
-            config: query.config.clone(),
-        },
-    );
-    let response = run_cli(cli_path, args).await?;
+    let response = run_cli(cli_path, query.comic_args()).await?;
     if !response.ok {
         anyhow::bail!(response.stderr);
     }
@@ -589,8 +582,7 @@ async fn fetch_comic_info(cli_path: &str, query: &DownloadQuery) -> anyhow::Resu
 }
 
 async fn run_cli_json(cli_path: &str, args: Vec<String>) -> axum::response::Response {
-    let response = run_cli(cli_path, args).await;
-    match response {
+    match run_cli(cli_path, args).await {
         Ok(mut payload) => {
             payload.data = serde_json::from_str::<Value>(&payload.stdout).ok();
             let status = if payload.ok {
@@ -600,46 +592,25 @@ async fn run_cli_json(cli_path: &str, args: Vec<String>) -> axum::response::Resp
             };
             (status, Json(payload)).into_response()
         }
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(CommandResponse {
-                ok: false,
-                exit_code: -1,
-                command: vec![],
-                stdout: String::new(),
-                stderr: err.to_string(),
-                data: None,
-            }),
-        )
-            .into_response(),
+        Err(err) => command_error_response(err),
     }
 }
 
-async fn run_cli_text(cli_path: &str, args: Vec<String>) -> axum::response::Response {
-    let response = run_cli(cli_path, args).await;
-    match response {
-        Ok(payload) => {
-            let status = if payload.ok {
-                StatusCode::OK
-            } else {
-                StatusCode::BAD_GATEWAY
-            };
-            (status, Json(payload)).into_response()
-        }
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(CommandResponse {
-                ok: false,
-                exit_code: -1,
-                command: vec![],
-                stdout: String::new(),
-                stderr: err.to_string(),
-                data: None,
-            }),
-        )
-            .into_response(),
-    }
+fn command_error_response(err: anyhow::Error) -> axum::response::Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(CommandResponse {
+            ok: false,
+            exit_code: -1,
+            command: vec![],
+            stdout: String::new(),
+            stderr: err.to_string(),
+            data: None,
+        }),
+    )
+        .into_response()
 }
+
 
 async fn run_cli(cli_path: &str, args: Vec<String>) -> anyhow::Result<CommandResponse> {
     let output = Command::new(cli_path)

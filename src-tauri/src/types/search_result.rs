@@ -123,11 +123,6 @@ pub struct ComicInSearch {
 }
 
 impl ComicInSearch {
-    pub fn from_li(app: &AppHandle, li: &ElementRef) -> anyhow::Result<ComicInSearch> {
-        let download_dir = app.get_config().read().download_dir.clone();
-        Self::from_li_with_download_dir(Some(download_dir.as_path()), li)
-    }
-
     pub fn from_li_with_download_dir(
         download_dir: Option<&Path>,
         li: &ElementRef,

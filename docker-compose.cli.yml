@@ -10,8 +10,9 @@ services:
       WNACG_TASK_API_BASE: "http://127.0.0.1:3000"
       WNACG_WEB_DIST_PATH: "/usr/local/share/wnacg-web"
       WNACG_CLI_PATH: "/usr/local/libexec/wnacg-worker"
+      WNACG_TASK_STORE_PATH: "/var/lib/wnacg/wnacg-tasks.sqlite"
     volumes:
-      - /vol2/1000/download:/data
+      - /vol4/1000/media/porn/manga:/data
       - ./docker-config:/config
     ports:
       - "3001:3000"

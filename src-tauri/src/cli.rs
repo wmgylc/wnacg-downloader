@@ -461,11 +461,11 @@ async fn maybe_submit_download_task(args: &DownloadArgs) -> anyhow::Result<Optio
         return Ok(None);
     }
 
-    let Some(api_base) = std::env::var("WNACG_TASK_API_BASE").ok().filter(|value| !value.is_empty()) else {
+    let Some(api_base) = task_api_base() else {
         return Ok(None);
     };
 
-    let mut url = Url::parse(&format!("{}/download/start", api_base.trim_end_matches('/')))
+    let mut url = task_api_url(&api_base, "download/start")
         .with_context(|| format!("解析任务 API 地址 `{api_base}` 失败"))?;
     {
         let mut query = url.query_pairs_mut();
@@ -493,12 +493,7 @@ async fn maybe_submit_download_task(args: &DownloadArgs) -> anyhow::Result<Optio
         }
     }
 
-    let client = Client::builder()
-        .use_rustls_tls()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .context("创建任务 API 客户端失败")?;
-    let response = client
+    let response = task_api_client()?
         .get(url.clone())
         .send()
         .await
@@ -512,23 +507,19 @@ async fn maybe_submit_download_task(args: &DownloadArgs) -> anyhow::Result<Optio
 }
 
 async fn fetch_task_api_json(task_id: Option<&str>) -> anyhow::Result<String> {
-    let Some(api_base) = std::env::var("WNACG_TASK_API_BASE").ok().filter(|value| !value.is_empty()) else {
+    let Some(api_base) = task_api_base() else {
         return Err(anyhow!(
             "当前环境未配置 `WNACG_TASK_API_BASE`，无法查询统一任务中心"
         ));
     };
 
-    let path = match task_id {
-        Some(task_id) => format!("{}/tasks/{task_id}", api_base.trim_end_matches('/')),
-        None => format!("{}/tasks", api_base.trim_end_matches('/')),
+    let api_path = match task_id {
+        Some(task_id) => format!("tasks/{task_id}"),
+        None => "tasks".to_string(),
     };
-    let url = Url::parse(&path).with_context(|| format!("解析任务 API 地址 `{path}` 失败"))?;
-    let client = Client::builder()
-        .use_rustls_tls()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .context("创建任务 API 客户端失败")?;
-    let response = client
+    let url = task_api_url(&api_base, &api_path)
+        .with_context(|| format!("解析任务 API 地址 `{api_base}/{api_path}` 失败"))?;
+    let response = task_api_client()?
         .get(url.clone())
         .send()
         .await
@@ -539,6 +530,29 @@ async fn fetch_task_api_json(task_id: Option<&str>) -> anyhow::Result<String> {
         return Err(anyhow!("任务 API 返回异常状态码({status}): {body}"));
     }
     Ok(body)
+}
+
+fn task_api_base() -> Option<String> {
+    std::env::var("WNACG_TASK_API_BASE")
+        .ok()
+        .filter(|value| !value.is_empty())
+}
+
+fn task_api_url(api_base: &str, path: &str) -> anyhow::Result<Url> {
+    Url::parse(&format!(
+        "{}/{}",
+        api_base.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    ))
+    .with_context(|| format!("解析任务 API 地址 `{api_base}` 失败"))
+}
+
+fn task_api_client() -> anyhow::Result<Client> {
+    Client::builder()
+        .use_rustls_tls()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("创建任务 API 客户端失败")
 }
 
 fn print_task_summary(task: serde_json::Value, explicit_id: Option<&str>) -> anyhow::Result<()> {
@@ -1323,17 +1337,4 @@ fn bark_message_from_payload(payload: &WebhookPayload) -> (String, String) {
         ),
     };
     (title, body)
-}
-
-fn cleanup_paths(paths: &[PathBuf]) {
-    for path in paths {
-        if !path.exists() {
-            continue;
-        }
-        if path.is_dir() {
-            let _ = std::fs::remove_dir_all(path);
-        } else {
-            let _ = std::fs::remove_file(path);
-        }
-    }
 }

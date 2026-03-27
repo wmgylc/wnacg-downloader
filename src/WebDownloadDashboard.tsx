@@ -26,23 +26,48 @@ type DownloadTask = {
   finishedAt?: string
 }
 
-const DEFAULT_API_BASE =
+type TaskGroupKey = 'downloading' | 'success' | 'failed'
+
+const API_BASE =
   typeof window !== 'undefined' ? `${window.location.origin}/api` : 'http://10.10.10.206:3000'
+
+const TASK_GROUPS: Array<{
+  key: TaskGroupKey
+  label: string
+  tagType: 'warning' | 'success' | 'error'
+}> = [
+  { key: 'downloading', label: '下载中', tagType: 'warning' },
+  { key: 'success', label: '下载完成', tagType: 'success' },
+  { key: 'failed', label: '下载失败', tagType: 'error' },
+]
 
 export default defineComponent({
   name: 'WebDownloadDashboard',
   setup() {
     const message = useMessage()
-    const apiBase = ref(DEFAULT_API_BASE)
     const url = ref('')
     const tasks = ref<DownloadTask[]>([])
     const submitting = ref(false)
     let timer: number | undefined
 
+    async function requestJson(path: string, params?: Record<string, string>) {
+      const requestUrl = new URL(path.replace(/^\/+/, ''), `${API_BASE.replace(/\/+$/, '')}/`)
+      Object.entries(params ?? {}).forEach(([key, value]) => {
+        requestUrl.searchParams.set(key, value)
+      })
+
+      const response = await fetch(requestUrl)
+      const payload = await response.json()
+      if (!response.ok) {
+        throw new Error(payload.error || payload.stderr || '请求失败')
+      }
+      return payload
+    }
+
     const sortedTasks = computed(() =>
       [...tasks.value].sort((a, b) => Number(b.updatedAt) - Number(a.updatedAt)),
     )
-    const groupedTasks = computed(() => ({
+    const groupedTasks = computed<Record<TaskGroupKey, DownloadTask[]>>(() => ({
       downloading: sortedTasks.value.filter((task) => task.status === 'downloading'),
       success: sortedTasks.value.filter((task) => task.status === 'success'),
       failed: sortedTasks.value.filter((task) => task.status === 'failed'),
@@ -50,8 +75,7 @@ export default defineComponent({
 
     async function loadTasks() {
       try {
-        const response = await fetch(`${apiBase.value}/tasks`)
-        const payload = await response.json()
+        const payload = await requestJson('tasks')
         tasks.value = payload.tasks ?? []
       } catch (error) {
         console.error(error)
@@ -67,13 +91,7 @@ export default defineComponent({
 
       submitting.value = true
       try {
-        const requestUrl = new URL(`download/start`, `${apiBase.value.replace(/\/+$/, '')}/`)
-        requestUrl.searchParams.set('target', target)
-        const response = await fetch(requestUrl)
-        const payload = await response.json()
-        if (!response.ok) {
-          throw new Error(payload.error || payload.stderr || '创建下载任务失败')
-        }
+        await requestJson('download/start', { target })
         url.value = ''
         message.success('下载任务已创建')
         await loadTasks()
@@ -84,26 +102,8 @@ export default defineComponent({
       }
     }
 
-    function statusType(status: DownloadTask['status']) {
-      switch (status) {
-        case 'success':
-          return 'success'
-        case 'failed':
-          return 'error'
-        default:
-          return 'warning'
-      }
-    }
-
-    function statusLabel(status: DownloadTask['status']) {
-      switch (status) {
-        case 'success':
-          return '下载完成'
-        case 'failed':
-          return '下载失败'
-        default:
-          return '下载中'
-      }
+    function statusMeta(status: DownloadTask['status']) {
+      return TASK_GROUPS.find((group) => group.key === status) ?? TASK_GROUPS[0]
     }
 
     function progressPercentage(task: DownloadTask) {
@@ -167,17 +167,17 @@ export default defineComponent({
             </NCard>
           ) : (
             <div class="space-y-8">
-              {(['downloading', 'success', 'failed'] as const).map((group) =>
-                groupedTasks.value[group].length > 0 ? (
-                  <section key={group}>
+              {TASK_GROUPS.map((group) =>
+                groupedTasks.value[group.key].length > 0 ? (
+                  <section key={group.key}>
                     <div class="mb-3 flex items-center gap-3">
-                      <div class="text-lg font-700">{statusLabel(group)}</div>
-                      <NTag bordered={false} type={statusType(group) as 'success' | 'error' | 'warning'}>
-                        {groupedTasks.value[group].length}
+                      <div class="text-lg font-700">{group.label}</div>
+                      <NTag bordered={false} type={group.tagType}>
+                        {groupedTasks.value[group.key].length}
                       </NTag>
                     </div>
                     <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-                      {groupedTasks.value[group].map((task) => (
+                      {groupedTasks.value[group.key].map((task) => (
                         <NCard
                           key={task.id}
                           bordered={false}
@@ -197,8 +197,8 @@ export default defineComponent({
                             </div>
                             <div class="min-w-0 flex-1">
                               <NSpace align="center" justify="space-between">
-                                <NTag type={statusType(task.status) as 'success' | 'error' | 'warning'} bordered={false}>
-                                  {statusLabel(task.status)}
+                                <NTag type={statusMeta(task.status).tagType} bordered={false}>
+                                  {statusMeta(task.status).label}
                                 </NTag>
                                 <div class="text-xs text-slate-400">#{task.id.slice(0, 8)}</div>
                               </NSpace>
