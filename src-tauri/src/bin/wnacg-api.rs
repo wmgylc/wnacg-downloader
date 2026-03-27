@@ -7,6 +7,7 @@ use axum::{
     routing::{get, get_service},
     Json, Router,
 };
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::{
@@ -24,7 +25,7 @@ use uuid::Uuid;
 struct AppState {
     cli_path: String,
     tasks: Arc<RwLock<HashMap<String, DownloadTask>>>,
-    task_store_path: Arc<PathBuf>,
+    task_db_path: Arc<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -117,10 +118,12 @@ async fn main() -> anyhow::Result<()> {
     let web_dist_path = std::env::var("WNACG_WEB_DIST_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/usr/local/share/wnacg-web"));
-    let task_store_path = std::env::var("WNACG_TASK_STORE_PATH")
+    let task_db_path = std::env::var("WNACG_TASK_STORE_PATH")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/data/wnacg-tasks.json"));
-    let tasks = Arc::new(RwLock::new(load_tasks(&task_store_path).await.unwrap_or_default()));
+        .unwrap_or_else(|_| PathBuf::from("/data/wnacg-tasks.sqlite"));
+    let tasks = Arc::new(RwLock::new(
+        load_tasks(&task_db_path).await.unwrap_or_default(),
+    ));
 
     let api_router = Router::new()
         .route("/health", get(health))
@@ -139,7 +142,7 @@ async fn main() -> anyhow::Result<()> {
     let app_state = AppState {
         cli_path,
         tasks,
-        task_store_path: Arc::new(task_store_path),
+        task_db_path: Arc::new(task_db_path),
     };
     let app = Router::new()
         .nest("/api", api_router.clone())
@@ -262,7 +265,7 @@ async fn start_download(
         .write()
         .await
         .insert(task_id.clone(), task.clone());
-    persist_tasks(&state).await;
+    persist_task(state.task_db_path.as_ref(), &task).await;
 
     let state_for_task = state.clone();
     tokio::spawn(async move {
@@ -396,45 +399,119 @@ async fn update_task<F>(state: &AppState, task_id: &str, mut updater: F)
 where
     F: FnMut(&mut DownloadTask),
 {
-    let mut changed = false;
+    let mut changed_task = None;
     {
         let mut tasks = state.tasks.write().await;
         if let Some(task) = tasks.get_mut(task_id) {
             updater(task);
-            changed = true;
+            changed_task = Some(task.clone());
         }
     }
-    if changed {
-        persist_tasks(state).await;
+    if let Some(task) = changed_task {
+        persist_task(state.task_db_path.as_ref(), &task).await;
     }
 }
 
-async fn persist_tasks(state: &AppState) {
-    let tasks = state.tasks.read().await.clone();
-    let path = state.task_store_path.as_ref().clone();
-    if let Some(parent) = path.parent() {
-        if let Err(err) = tokio::fs::create_dir_all(parent).await {
-            eprintln!("failed to create task store dir `{}`: {err}", parent.display());
-            return;
-        }
-    }
-    let content = match serde_json::to_vec_pretty(&tasks) {
-        Ok(content) => content,
-        Err(err) => {
-            eprintln!("failed to serialize tasks: {err}");
-            return;
-        }
-    };
-    if let Err(err) = tokio::fs::write(&path, content).await {
-        eprintln!("failed to persist tasks to `{}`: {err}", path.display());
+async fn persist_task(path: &PathBuf, task: &DownloadTask) {
+    let path = path.clone();
+    let task = task.clone();
+    let task_id = task.id.clone();
+    match tokio::task::spawn_blocking(move || persist_task_blocking(&path, &task)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => eprintln!("failed to persist task `{}`: {err:#}", task_id),
+        Err(err) => eprintln!("failed to join sqlite task writer: {err}"),
     }
 }
 
 async fn load_tasks(path: &PathBuf) -> anyhow::Result<HashMap<String, DownloadTask>> {
-    if !path.exists() {
-        return Ok(HashMap::new());
+    let path = path.clone();
+    tokio::task::spawn_blocking(move || load_tasks_blocking(&path))
+        .await
+        .map_err(|err| anyhow::anyhow!("join sqlite loader failed: {err}"))?
+}
+
+fn persist_task_blocking(path: &PathBuf, task: &DownloadTask) -> anyhow::Result<()> {
+    let conn = open_task_db(path)?;
+    let payload = serde_json::to_string(task)?;
+    conn.execute(
+        "INSERT INTO tasks (id, updated_at, payload)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(id) DO UPDATE SET
+           updated_at = excluded.updated_at,
+           payload = excluded.payload",
+        params![task.id, task.updated_at, payload],
+    )?;
+    Ok(())
+}
+
+fn load_tasks_blocking(path: &PathBuf) -> anyhow::Result<HashMap<String, DownloadTask>> {
+    let conn = open_task_db(path)?;
+    let mut tasks = load_tasks_from_db(&conn)?;
+    if tasks.is_empty() {
+        let legacy_json_path = path.with_extension("json");
+        if legacy_json_path.exists() {
+            let imported = load_legacy_json_tasks(&legacy_json_path)?;
+            if !imported.is_empty() {
+                persist_task_batch(&conn, imported.values())?;
+                tasks = imported;
+            }
+        }
     }
-    let content = tokio::fs::read(path).await?;
+    Ok(tasks)
+}
+
+fn open_task_db(path: &PathBuf) -> anyhow::Result<Connection> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let conn = Connection::open(path)?;
+    conn.execute_batch(
+        "
+        PRAGMA journal_mode = WAL;
+        PRAGMA synchronous = NORMAL;
+        CREATE TABLE IF NOT EXISTS tasks (
+            id TEXT PRIMARY KEY,
+            updated_at TEXT NOT NULL,
+            payload TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_tasks_updated_at ON tasks(updated_at DESC);
+        ",
+    )?;
+    Ok(conn)
+}
+
+fn load_tasks_from_db(conn: &Connection) -> anyhow::Result<HashMap<String, DownloadTask>> {
+    let mut stmt = conn.prepare("SELECT payload FROM tasks ORDER BY updated_at DESC")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let mut tasks = HashMap::new();
+    for row in rows {
+        let payload = row?;
+        let task: DownloadTask = serde_json::from_str(&payload)?;
+        tasks.insert(task.id.clone(), task);
+    }
+    Ok(tasks)
+}
+
+fn persist_task_batch<'a, I>(conn: &Connection, tasks: I) -> anyhow::Result<()>
+where
+    I: IntoIterator<Item = &'a DownloadTask>,
+{
+    let mut stmt = conn.prepare(
+        "INSERT INTO tasks (id, updated_at, payload)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(id) DO UPDATE SET
+           updated_at = excluded.updated_at,
+           payload = excluded.payload",
+    )?;
+    for task in tasks {
+        let payload = serde_json::to_string(task)?;
+        stmt.execute(params![task.id, task.updated_at, payload])?;
+    }
+    Ok(())
+}
+
+fn load_legacy_json_tasks(path: &PathBuf) -> anyhow::Result<HashMap<String, DownloadTask>> {
+    let content = std::fs::read(path)?;
     Ok(serde_json::from_slice(&content)?)
 }
 

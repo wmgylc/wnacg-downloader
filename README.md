@@ -73,6 +73,7 @@ curl "http://127.0.0.1:3001/api/tasks"
 - 宿主机目录 `./docker-config` 会挂载到容器内的 `/config`
 - 配置文件默认是 [`docker-config/wnacg-cli.json`](/Users/wmgylc/code/wnacg-downloader/docker-config/wnacg-cli.json)
 - 页面和 API 共用同一个容器，对外端口是 `3001`
+- 任务历史默认持久化到 `/data/wnacg-tasks.sqlite`，首次启动时如果发现旧的 `/data/wnacg-tasks.json`，会自动导入到 SQLite
 
 下载完成后会自动生成同名 `.zip` 文件，并删除原始漫画目录，只保留压缩包。
 下载过程中带两层失败恢复：单张图片默认重试 `2` 次，整本任务默认重试 `1` 次；如果最终仍然失败，会保留临时目录，便于后续续传。

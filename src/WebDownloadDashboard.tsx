@@ -61,7 +61,7 @@ export default defineComponent({
     async function startDownload() {
       const target = url.value.trim()
       if (!target) {
-        message.warning('请输入漫画详情页 URL')
+        message.warning('请输入任意页或漫画详情页 URL')
         return
       }
 
@@ -128,16 +128,21 @@ export default defineComponent({
       <div class="min-h-screen bg-[radial-gradient(circle_at_top,#fff7ed_0%,#fff 38%,#f8fafc_100%)] text-slate-900">
         <div class="mx-auto max-w-6xl px-4 py-8 md:px-8">
           <div class="mb-8 overflow-hidden rounded-6 border border-solid border-orange-200 bg-white/88 p-6 shadow-[0_24px_80px_rgba(15,23,42,0.08)] backdrop-blur">
-            <div class="mb-2 text-sm font-600 uppercase tracking-[0.22em] text-orange-500">WNACG HTTP Downloader</div>
-            <div class="mb-6 max-w-3xl text-4xl font-800 leading-tight">
-              输入漫画详情页 URL，直接发起下载任务并在页面里追踪状态
+            <div class="mb-2 flex items-center gap-3">
+              <div class="text-sm font-600 uppercase tracking-[0.22em] text-orange-500">WNACG HTTP Downloader</div>
+              <NButton
+                tertiary
+                type="primary"
+                size="small"
+                onClick={() => window.open('/api-doc.html', '_blank', 'noopener,noreferrer')}>
+                API DOC
+              </NButton>
             </div>
-            <div class="mb-3 text-sm text-slate-500">当前 API: {apiBase.value}</div>
-            <div class="flex flex-col gap-3 md:flex-row">
+            <div class="mb-6 flex flex-col gap-3 md:flex-row">
               <NInput
                 value={url.value}
                 onUpdate:value={(value) => (url.value = value)}
-                placeholder="https://www.wnacg.com/photos-index-aid-325177.html"
+                placeholder="输入任意页或漫画详情页 URL"
                 size="large"
                 onKeydown={(event: KeyboardEvent) => {
                   if (event.key === 'Enter') {
