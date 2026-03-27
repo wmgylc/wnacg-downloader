@@ -1,13 +1,6 @@
 # WNACG Downloader Service
 
-这个仓库现在只保留当前还在使用的能力：
-
-- 网页下载面板
-- HTTP GET API
-- 服务端下载、打包、通知
-- 下载任务持久化
-
-旧的 Tauri GUI、书架、登录、下载面板、类型绑定和相关文档都已经移除，不再是这个仓库的一部分。
+一个用于 WNACG 下载的网页与 HTTP 服务。
 
 ## 当前形态
 
@@ -149,4 +142,4 @@ pnpm dev
 pnpm build
 ```
 
-当前仓库默认面向 Docker 部署和网页/API 使用，不再提供旧版桌面 GUI 工作流。
+当前仓库默认面向 Docker 部署和网页/API 使用。
